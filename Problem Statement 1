@@ -1,0 +1,138 @@
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+#include <stdio.h>
+#include <stdint.h>
+
+/* Structure to hold data */
+typedef struct {
+    uint8_t dataID;
+    int32_t DataValue;
+} Data_t;
+
+/* Global variables (shared between tasks) */
+volatile uint8_t G_DataID = 1;
+volatile int32_t G_DataValue = 0;
+
+/* Task and Queue handles */
+TaskHandle_t TaskHandle_1 = NULL;
+TaskHandle_t TaskHandle_2 = NULL;
+QueueHandle_t Queue1 = NULL;
+
+/* Function prototypes */
+void ExampleTask1(void *pvParameters);
+void ExampleTask2(void *pvParameters);
+
+/* ---------- MAIN FUNCTION ---------- */
+int main(void)
+{
+    /* Create a queue that can hold 5 Data_t items */
+    Queue1 = xQueueCreate(5, sizeof(Data_t));
+    if (Queue1 == NULL) {
+        /* Queue creation failed */
+        for(;;);
+    }
+
+    /* Create both tasks */
+    xTaskCreate(ExampleTask1, "Sender",
+                configMINIMAL_STACK_SIZE + 128, NULL,
+                tskIDLE_PRIORITY + 2, &TaskHandle_1);
+
+    xTaskCreate(ExampleTask2, "Receiver",
+                configMINIMAL_STACK_SIZE + 256, NULL,
+                tskIDLE_PRIORITY + 1, &TaskHandle_2);
+
+    /* Start the FreeRTOS scheduler */
+    vTaskStartScheduler();
+
+    /* If scheduler fails to start (shouldn’t happen normally) */
+    for(;;);
+}
+
+/* ---------- TASK 1: Periodic Sender ---------- */
+void ExampleTask1(void *pvParameters)
+{
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xPeriod = pdMS_TO_TICKS(500);  // 500ms interval
+    Data_t msg;
+
+    for(;;)
+    {
+        /* Copy shared global data safely */
+        taskENTER_CRITICAL();
+        msg.dataID = G_DataID;
+        msg.DataValue = G_DataValue;
+        taskEXIT_CRITICAL();
+
+        /* Send message to queue (no wait if full) */
+        xQueueSend(Queue1, &msg, (TickType_t)0);
+
+        /* Wait until exactly 500ms after last run */
+        vTaskDelayUntil(&xLastWakeTime, xPeriod);
+    }
+}
+
+/* ---------- TASK 2: Receiver & Processor ---------- */
+void ExampleTask2(void *pvParameters)
+{
+    Data_t rcv;
+    BaseType_t xStatus;
+    UBaseType_t originalPriority = uxTaskPriorityGet(NULL);
+
+    for(;;)
+    {
+        /* Wait (block) until data is received */
+        xStatus = xQueueReceive(Queue1, &rcv, portMAX_DELAY);
+
+        if (xStatus == pdPASS)
+        {
+            printf("Received - dataID: %u, DataValue: %ld\r\n",
+                   (unsigned)rcv.dataID, (long)rcv.DataValue);
+
+            /* Check dataID */
+            if (rcv.dataID == 0)
+            {
+                /* Stop this task */
+                vTaskDelete(NULL);
+            }
+            else if (rcv.dataID == 1)
+            {
+                /* Handle different DataValue cases */
+                if (rcv.DataValue == 0)
+                {
+                    /* Increase priority by 2 */
+                    UBaseType_t newPrio = uxTaskPriorityGet(NULL) + 2;
+                    vTaskPrioritySet(NULL, newPrio);
+                    printf("Priority increased to %u\r\n", (unsigned)newPrio);
+                }
+                else if (rcv.DataValue == 1)
+                {
+                    /* Decrease priority if previously increased */
+                    UBaseType_t cur = uxTaskPriorityGet(NULL);
+                    if (cur > originalPriority)
+                    {
+                        UBaseType_t newPrio = (cur >= 2) ? (cur - 2) : originalPriority;
+                        if (newPrio < originalPriority)
+                            newPrio = originalPriority;
+
+                        vTaskPrioritySet(NULL, newPrio);
+                        printf("Priority decreased to %u\r\n", (unsigned)newPrio);
+                    }
+                    else
+                    {
+                        printf("Priority already at original; not decreased.\r\n");
+                    }
+                }
+                else if (rcv.DataValue == 2)
+                {
+                    /* Delete the task */
+                    vTaskDelete(NULL);
+                }
+            }
+            else
+            {
+                printf("Unhandled dataID: %u\r\n", (unsigned)rcv.dataID);
+            }
+        }
+    }
+}
